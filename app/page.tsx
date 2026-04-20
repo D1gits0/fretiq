@@ -4,6 +4,7 @@ import dynamic from 'next/dynamic';
 import { useStore } from '@/store/useStore';
 import { useKatanaAudio } from '@/hooks/useKatanaAudio';
 import { useAIClassifier } from '@/hooks/useAIClassifier';
+import { usePitchDetection } from '@/hooks/usePitchDetection';
 import DataRecorder from '@/components/DataRecorder';
 
 // KatanaScene uses R3F — must be client-only, no SSR
@@ -12,8 +13,9 @@ const KatanaScene = dynamic(() => import('@/components/KatanaScene'), { ssr: fal
 // ─── Root page ────────────────────────────────────────────────────────────────
 
 export default function Page() {
-  const { startListening, stopListening } = useKatanaAudio();
+  const { startListening, stopListening, getAnalyser } = useKatanaAudio();
   useAIClassifier();
+  usePitchDetection(getAnalyser);
 
   const isListening = useStore((s) => s.isListening);
   const audioError  = useStore((s) => s.audioError);

@@ -19,7 +19,7 @@ const BINS = {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 /** Minimum RMS intensity to bother classifying (below = Idle) */
-const SILENCE_THRESHOLD = 0.04;
+const SILENCE_THRESHOLD = 0.005;
 
 /** How much to smooth confidence scores frame-to-frame (0=none, 1=frozen) */
 const CONFIDENCE_SMOOTHING = 0.8;

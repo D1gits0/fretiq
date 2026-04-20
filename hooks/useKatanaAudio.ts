@@ -104,7 +104,7 @@ export function useKatanaAudio() {
  
     // Push to store — pass a *new* Uint8Array so React detects the change
     setFrequencyData(new Uint8Array(buffer) as Uint8Array);
-    setIntensity(rms);
+    setIntensity(Math.min(1, rms * 10));
  
     // Schedule next frame
     rafRef.current = requestAnimationFrame(tick);

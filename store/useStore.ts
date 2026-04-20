@@ -18,9 +18,17 @@ export interface KatanaStore {
 
   // ── AI Predictions ───────────────────────────────────────────────────────
   style: GuitarStyle;
-  intensity: number;          // 0–1, derived from RMS volume
+  intensity: number;           // 0–1, derived from RMS volume
   confidence: StyleConfidence; // per-class softmax outputs
-  frequencyData: Uint8Array;  // raw FFT snapshot (length = analyser.frequencyBinCount)
+  frequencyData: Uint8Array;   // raw FFT snapshot (length = analyser.frequencyBinCount)
+
+  // ── Pitch / Fretboard ─────────────────────────────────────────────────────
+  note: string;             // e.g. 'E2', 'A3', '' when silent
+  frequency: number;        // detected Hz, 0 when silent
+  fret: number;             // 0–24, -1 when no note detected
+  string: number;           // 0–5 (0 = low E), -1 when no note detected
+  chordName: string;        // e.g. 'Em', 'G', '' when not a recognised chord
+  stringConfidence: number; // 0–1, how confident the string mapping is
 
   // ── Actions ──────────────────────────────────────────────────────────────
   setListening: (listening: boolean) => void;
@@ -29,6 +37,8 @@ export interface KatanaStore {
   setIntensity: (intensity: number) => void;
   setConfidence: (confidence: StyleConfidence) => void;
   setFrequencyData: (data: Uint8Array) => void;
+  setNote: (note: string, frequency: number, string: number, fret: number, stringConfidence: number) => void;
+  setChordName: (chordName: string) => void;
   reset: () => void;
 }
 
@@ -41,13 +51,17 @@ const initialState = {
   intensity: 0,
   confidence: { Shred: 0, Ambient: 0, Chords: 0 },
   frequencyData: new Uint8Array(0),
+  note: '',
+  frequency: 0,
+  fret: -1,
+  string: -1,
+  chordName: '',
+  stringConfidence: 0,
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 export const useStore = create<KatanaStore>()(
-  // subscribeWithSelector lets R3F components react to specific slices
-  // without re-rendering on every frequency update (critical for 60fps)
   subscribeWithSelector((set) => ({
     ...initialState,
 
@@ -57,26 +71,32 @@ export const useStore = create<KatanaStore>()(
 
     setStyle: (style) => set({ style }),
 
-    // Clamp intensity to [0, 1] before storing
     setIntensity: (intensity) => set({ intensity: Math.max(0, Math.min(1, intensity)) }),
 
     setConfidence: (confidence) => set({ confidence }),
 
-    // Typed array assignment — store keeps a reference, not a copy.
-    // The hook should pass a *new* Uint8Array each frame so React detects change.
     setFrequencyData: (frequencyData) => set({ frequencyData }),
+
+    // Batch note fields into one set() call to avoid cascading re-renders
+    setNote: (note, frequency, string, fret, stringConfidence) => set({ note, frequency, string, fret, stringConfidence }),
+
+    setChordName: (chordName) => set({ chordName }),
 
     reset: () => set(initialState),
   }))
 );
 
-// ─── Derived Selectors (use these in components for perf) ─────────────────────
+// ─── Derived Selectors ────────────────────────────────────────────────────────
 
-/** Returns the dominant style label and its confidence score */
 export const selectDominantStyle = (state: KatanaStore) => ({
   style: state.style,
   score: state.confidence[state.style as keyof StyleConfidence] ?? 0,
 });
 
-/** Returns true only when the amp is actively playing (not idle/silent) */
 export const selectIsPlaying = (state: KatanaStore) => state.intensity > 0.05;
+
+export const selectActiveFret = (state: KatanaStore) => ({
+  string: state.string,
+  fret: state.fret,
+  note: state.note,
+});
