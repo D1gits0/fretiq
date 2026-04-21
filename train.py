@@ -21,7 +21,7 @@ import tensorflow as tf
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-LABELS = ['Shred', 'Ambient', 'Chords']
+LABELS = ['E2', 'A2', 'D3', 'G3', 'B3', 'E4']
 INPUT_SIZE = 1024
 EPOCHS = 25
 BATCH_SIZE = 32
@@ -32,21 +32,33 @@ VALIDATION_SPLIT = 0.2
 def load_sessions(paths):
     """
     Load JSON files exported from the Data Recorder UI.
-    Each file is an array of { data: number[], label: string } objects.
+
+    Supports two frame formats:
+      New format (string recorder): { data: number[], label: string, preset: string }
+      Old format (style recorder):  { data: number[], label: string }
+
+    The 'preset' field is optional — frames without it are loaded with
+    preset='unknown' so they still contribute to training.
     """
     X, Y = [], []
+    preset_counts: dict[str, int] = {}
 
     for path in paths:
         print(f"Loading {path}...")
         with open(path, 'r') as f:
-            frames = json.load(f)
+            raw = json.load(f)
+
+        # Support both top-level array and { frames: [...] } wrapper
+        frames = raw if isinstance(raw, list) else raw.get('frames', [])
 
         for frame in frames:
-            data = frame.get('data') or frame.get('frequencyData')
+            data  = frame.get('data') or frame.get('frequencyData')
             label = frame.get('label')
 
             if data is None or label not in LABELS:
                 continue
+
+            preset = frame.get('preset', 'unknown')
 
             # Pad or truncate to INPUT_SIZE
             arr = np.array(data, dtype=np.float32)
@@ -57,14 +69,27 @@ def load_sessions(paths):
 
             X.append(arr)
             Y.append(LABELS.index(label))
+            preset_counts[preset] = preset_counts.get(preset, 0) + 1
 
     X = np.array(X, dtype=np.float32)
     Y = np.array(Y, dtype=np.int32)
 
-    print(f"\nLoaded {len(X)} frames total")
+    total = len(X)
+    if total == 0:
+        return X, Y
+
+    print(f"\nLoaded {total:,} frames total")
+
+    print("\nFrames per string:")
     for i, label in enumerate(LABELS):
-        count = np.sum(Y == i)
-        print(f"  {label}: {count} frames ({count/len(X)*100:.1f}%)")
+        count = int(np.sum(Y == i))
+        bar   = '█' * (count * 30 // max(total, 1))
+        print(f"  {label:<4} {count:>6,}  ({count / total * 100:5.1f}%)  {bar}")
+
+    print("\nFrames per preset:")
+    for preset, count in sorted(preset_counts.items(), key=lambda x: -x[1]):
+        bar = '█' * (count * 30 // max(total, 1))
+        print(f"  {preset:<10} {count:>6,}  ({count / total * 100:5.1f}%)  {bar}")
 
     return X, Y
 
@@ -73,7 +98,7 @@ def load_sessions(paths):
 def build_model():
     """
     Small 1D CNN. Input: 1024 normalized frequency bins.
-    Output: softmax over 3 classes (Shred, Ambient, Chords).
+    Output: softmax over 6 classes (E2, A2, D3, G3, B3, E4).
 
     Deliberately small — trains in minutes on CPU, runs in <1ms on browser.
     """
@@ -184,7 +209,7 @@ def export_tfjs(model, out_dir):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Katana-Vision style classifier')
+    parser = argparse.ArgumentParser(description='Train Katana-Vision string classifier')
     parser.add_argument(
         '--data', nargs='+', required=True,
         help='Path(s) to JSON session files from the Data Recorder'
@@ -208,7 +233,7 @@ def main():
 
     if len(X) < 100:
         print("\n⚠️  Warning: very few frames. Record more sessions for better accuracy.")
-        print("   Aim for 2-3 minutes per style (Shred, Ambient, Chords).\n")
+        print("   Aim for 2-3 minutes per string (E2, A2, D3, G3, B3, E4).\n")
 
     # Build + train
     model = build_model()

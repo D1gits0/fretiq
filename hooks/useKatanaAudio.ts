@@ -104,7 +104,7 @@ export function useKatanaAudio() {
  
     // Push to store — pass a *new* Uint8Array so React detects the change
     setFrequencyData(new Uint8Array(buffer) as Uint8Array);
-    setIntensity(Math.min(1, rms * 10));
+    setIntensity(Math.min(1, rms * 20));
  
     // Schedule next frame
     rafRef.current = requestAnimationFrame(tick);
@@ -149,9 +149,14 @@ export function useKatanaAudio() {
       analyser.fftSize = FFT_SIZE;
       analyser.smoothingTimeConstant = SMOOTHING;
  
-      // source → analyser (do NOT connect analyser → destination,
+      // Gain boost for quiet USB audio interfaces (e.g. Katana Gen 3 line level)
+      const gainNode = context.createGain();
+      gainNode.gain.value = 8;
+ 
+      // source → gain → analyser (do NOT connect analyser → destination,
       // or you'll hear the amp signal doubled through your speakers)
-      source.connect(analyser);
+      source.connect(gainNode);
+      gainNode.connect(analyser);
  
       nodesRef.current = { context, source, analyser, stream };
  
