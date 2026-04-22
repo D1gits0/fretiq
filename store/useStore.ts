@@ -29,6 +29,7 @@ export interface KatanaStore {
   string: number;           // 0–5 (0 = low E), -1 when no note detected
   chordName: string;        // e.g. 'Em', 'G', '' when not a recognised chord
   stringConfidence: number; // 0–1, how confident the string mapping is
+  stringProbs: number[];    // per-string softmax probabilities [E2,A2,D3,G3,B3,E4], length 6
 
   // ── Actions ──────────────────────────────────────────────────────────────
   setListening: (listening: boolean) => void;
@@ -37,7 +38,7 @@ export interface KatanaStore {
   setIntensity: (intensity: number) => void;
   setConfidence: (confidence: StyleConfidence) => void;
   setFrequencyData: (data: Uint8Array) => void;
-  setNote: (note: string, frequency: number, string: number, fret: number, stringConfidence: number) => void;
+  setNote: (note: string, frequency: number, string: number, fret: number, stringConfidence: number, stringProbs?: number[]) => void;
   setChordName: (chordName: string) => void;
   reset: () => void;
 }
@@ -57,6 +58,7 @@ const initialState = {
   string: -1,
   chordName: '',
   stringConfidence: 0,
+  stringProbs: [0, 0, 0, 0, 0, 0],
 };
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -78,7 +80,8 @@ export const useStore = create<KatanaStore>()(
     setFrequencyData: (frequencyData) => set({ frequencyData }),
 
     // Batch note fields into one set() call to avoid cascading re-renders
-    setNote: (note, frequency, string, fret, stringConfidence) => set({ note, frequency, string, fret, stringConfidence }),
+    setNote: (note, frequency, string, fret, stringConfidence, stringProbs = [0,0,0,0,0,0]) =>
+      set({ note, frequency, string, fret, stringConfidence, stringProbs }),
 
     setChordName: (chordName) => set({ chordName }),
 

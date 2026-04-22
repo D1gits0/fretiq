@@ -1,7 +1,8 @@
 'use client';
 
-import { useRef } from 'react';
+import { useRef, Suspense } from 'react';
 import { useFrame } from '@react-three/fiber';
+import { Text } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStore } from '@/store/useStore';
 
@@ -151,133 +152,193 @@ function Strings() {
 }
 
 /**
- * ActiveFretMarker
+ * ProbabilityHeatmap
  *
- * A glowing sphere + halo ring that lerps smoothly to the active string + fret.
- * Position is interpolated each frame so note transitions crossfade rather than
- * snap. Two point lights (tight + wide) create a dramatic spill onto the fretboard.
- * Uses useFrame + getState() — zero React re-renders.
+ * Single InstancedMesh with MAX_INSTANCES slots. Each frame, active instances
+ * are positioned at valid string/fret positions for the detected pitch and
+ * scaled by confidence. Inactive instances are scaled to zero (hidden).
+ *
+ * InstancedMesh = one draw call regardless of how many markers are visible.
+ * No per-frame material uploads, no context loss.
  */
-function ActiveFretMarker() {
-  const coreRef  = useRef<THREE.Mesh>(null);
-  const haloRef  = useRef<THREE.Mesh>(null);
-  const lightRef = useRef<THREE.PointLight>(null);
-  const fillRef  = useRef<THREE.PointLight>(null);
 
-  // Current lerped world position
-  const currentXRef = useRef<number>(0);
-  const currentZRef = useRef<number>(0);
+const TUNING_MIDI_FB: readonly number[] = [40, 45, 50, 55, 59, 64];
+const FRETS_FB       = 24;
+const MIN_BRIGHTNESS = 0.15;
+const MAX_INSTANCES  = 6; // max valid strings for any single pitch
 
-  // Glow brightness 0–1, lerped independently so fade-out is smooth
-  const glowRef = useRef<number>(0);
+// Reusable scratch objects — allocated once, never inside useFrame
+const _matrix     = new THREE.Matrix4();
+const _matrixBack = new THREE.Matrix4();
+const _color      = new THREE.Color(ACTIVE_COLOR);
+const _dark       = new THREE.Color('#000000');
 
-  useFrame(({ clock }, delta) => {
-    const { string, fret, intensity, stringConfidence } = useStore.getState();
-    const active = string >= 0 && fret >= 0;
+// Marker size constants
+// Base radius of the sphere geometry is 1 — scale drives actual world size.
+// MAX_MARKER_RADIUS = world-space radius of the highest-confidence marker.
+// MIN_MARKER_RADIUS = minimum visible size for low-confidence markers.
+const MAX_MARKER_RADIUS = 0.21; // 3× the old 0.07
+const MIN_MARKER_RADIUS = 0.06; // always visible even at MIN_BRIGHTNESS
 
-    // tau for position lerp: 0.08s → ~80ms convergence
-    const posTau   = 0.08;
-    const posAlpha = 1 - Math.exp(-delta / posTau);
+function ProbabilityHeatmap() {
+  const meshRef    = useRef<THREE.InstancedMesh>(null); // glow spheres
+  const backdropRef = useRef<THREE.InstancedMesh>(null); // dark backdrop discs
 
-    // tau for glow fade-in: 0.05s (snappy on attack)
-    // tau for glow fade-out: 0.18s → ~600ms to reach ~3% (perceptually gone)
-    const glowTau   = active ? 0.05 : 0.18;
-    const glowAlpha = 1 - Math.exp(-delta / glowTau);
-    const glowTarget = active ? 1 : 0;
-    glowRef.current += (glowTarget - glowRef.current) * glowAlpha;
+  // Per-instance lerped brightness (0 = hidden, 1 = full)
+  const glowRefs   = useRef<number[]>(new Array(MAX_INSTANCES).fill(0));
+  const lastMidi   = useRef<number>(-1);
+  const targetGlow = useRef<number[]>(new Array(MAX_INSTANCES).fill(0));
+  const targetX    = useRef<number[]>(new Array(MAX_INSTANCES).fill(0));
+  const targetZ    = useRef<number[]>(new Array(MAX_INSTANCES).fill(0));
 
-    const glow = glowRef.current;
+  useFrame((_, delta) => {
+    const mesh     = meshRef.current;
+    const backdrop = backdropRef.current;
+    if (!mesh || !backdrop) return;
 
-    // Hide completely only when glow is negligible — avoids GPU overdraw at rest
-    const visible = glow > 0.005;
-    [coreRef, haloRef].forEach(r => { if (r.current) r.current.visible = visible; });
-    [lightRef, fillRef].forEach(r => { if (r.current) r.current.visible = visible; });
+    const { note, frequency, stringProbs, intensity } = useStore.getState();
+    const midi = frequency > 0
+      ? Math.round(12 * Math.log2(frequency / 440) + 69)
+      : -1;
+    const active = note !== '' && midi >= 0;
 
-    if (!visible || !coreRef.current || !haloRef.current || !lightRef.current || !fillRef.current) return;
-
-    // Lerp position toward target (or hold last position while fading out)
-    if (active) {
-      const targetX = fretCenterX(fret);
-      const targetZ = stringZ(string);
-      currentXRef.current += (targetX - currentXRef.current) * posAlpha;
-      currentZRef.current += (targetZ - currentZRef.current) * posAlpha;
+    // Recompute targets only when midi changes
+    if (midi !== lastMidi.current) {
+      lastMidi.current = midi;
+      for (let s = 0; s < MAX_INSTANCES; s++) {
+        const fret = midi >= 0 ? midi - TUNING_MIDI_FB[s] : -1;
+        if (active && fret >= 0 && fret <= FRETS_FB) {
+          targetX.current[s]    = fretCenterX(fret);
+          targetZ.current[s]    = stringZ(s);
+          const prob            = (stringProbs && isFinite(stringProbs[s])) ? stringProbs[s] : 0;
+          targetGlow.current[s] = Math.max(MIN_BRIGHTNESS, prob);
+        } else {
+          targetGlow.current[s] = 0;
+        }
+      }
     }
 
-    const cx = currentXRef.current;
-    const cz = currentZRef.current;
-    const t  = clock.elapsedTime;
+    const safeIntensity = isFinite(intensity) ? intensity : 0;
 
-    const conf = active ? (0.3 + stringConfidence * 0.7) : 1.0;
+    // Find the max glow this frame so we can scale relative to it
+    let maxGlow = 0;
+    for (let i = 0; i < MAX_INSTANCES; i++) {
+      if (glowRefs.current[i] > maxGlow) maxGlow = glowRefs.current[i];
+    }
 
-    // Core sphere
-    const corePulse = 1 + intensity * 0.5 + Math.sin(t * 10) * 0.08;
-    coreRef.current.position.set(cx, 0.07, cz);
-    coreRef.current.scale.setScalar(corePulse);
-    const coreMat = coreRef.current.material as THREE.MeshStandardMaterial;
-    coreMat.emissiveIntensity = (2.0 + intensity * 3.0) * conf * glow;
+    for (let i = 0; i < MAX_INSTANCES; i++) {
+      const tgt   = active ? targetGlow.current[i] : 0;
+      const tau   = tgt > glowRefs.current[i] ? 0.025 : 0.18;
+      const alpha = 1 - Math.exp(-delta / tau);
+      glowRefs.current[i] += (tgt - glowRefs.current[i]) * alpha;
 
-    // Halo ring
-    const haloPulse = 1.6 + intensity * 0.8 + Math.sin(t * 5) * 0.15;
-    haloRef.current.position.set(cx, 0.07, cz);
-    haloRef.current.scale.setScalar(haloPulse);
-    const haloMat = haloRef.current.material as THREE.MeshStandardMaterial;
-    haloMat.opacity = (0.25 + intensity * 0.3) * (0.2 + stringConfidence * 0.8) * glow;
+      const glow = Math.max(0, isFinite(glowRefs.current[i]) ? glowRefs.current[i] : 0);
 
-    // Tight key light
-    lightRef.current.position.set(cx, 0.25, cz);
-    lightRef.current.intensity = (2.0 + intensity * 4.0) * conf * glow;
+      if (glow < 0.005) {
+        // Hide by scaling to zero
+        _matrix.makeScale(0, 0, 0);
+        mesh.setMatrixAt(i, _matrix);
+        backdrop.setMatrixAt(i, _matrix);
+        continue;
+      }
 
-    // Wide fill light
-    fillRef.current.position.set(cx, 0.8, cz);
-    fillRef.current.intensity = (0.8 + intensity * 1.5) * conf * glow;
+      const x = targetX.current[i];
+      const z = targetZ.current[i];
+
+      // Scale: highest-confidence marker gets MAX_MARKER_RADIUS,
+      // others scale proportionally but never below MIN_MARKER_RADIUS.
+      const normGlow  = maxGlow > 0 ? glow / maxGlow : glow;
+      const radius    = MIN_MARKER_RADIUS + (MAX_MARKER_RADIUS - MIN_MARKER_RADIUS) * normGlow;
+      const pulseSize = radius * (1 + safeIntensity * 0.2);
+
+      _matrix.makeScale(pulseSize, pulseSize, pulseSize);
+      _matrix.setPosition(x, 0.07, z);
+      mesh.setMatrixAt(i, _matrix);
+
+      // Backdrop disc: slightly larger than sphere, flat on the fretboard face
+      const backRadius = pulseSize * 1.6;
+      _matrixBack.makeScale(backRadius, 1, backRadius); // Y=1 because disc is flat
+      _matrixBack.setPosition(x, 0.01, z);
+      backdrop.setMatrixAt(i, _matrixBack);
+
+      // Sphere color: full brightness for highest, dimmer for lower confidence
+      const brightness = Math.max(0, Math.min(1, normGlow));
+      mesh.setColorAt(i, _color.clone().multiplyScalar(0.3 + brightness * 0.7));
+
+      // Backdrop always dark
+      backdrop.setColorAt(i, _dark);
+    }
+
+    mesh.instanceMatrix.needsUpdate = true;
+    backdrop.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor)     mesh.instanceColor.needsUpdate = true;
+    if (backdrop.instanceColor) backdrop.instanceColor.needsUpdate = true;
   });
 
   return (
     <group>
-      {/* Core glow sphere */}
-      <mesh ref={coreRef} visible={false}>
-        <sphereGeometry args={[0.08, 16, 16]} />
-        <meshStandardMaterial
-          color={ACTIVE_COLOR}
-          emissive={ACTIVE_EMISSIVE}
-          emissiveIntensity={2.0}
-          roughness={0.0}
-          metalness={0.2}
-        />
-      </mesh>
-
-      {/* Outer halo — transparent, larger, slower pulse */}
-      <mesh ref={haloRef} visible={false}>
-        <sphereGeometry args={[0.08, 12, 12]} />
-        <meshStandardMaterial
-          color={ACTIVE_COLOR}
-          emissive={ACTIVE_EMISSIVE}
-          emissiveIntensity={1.0}
+      {/* Dark backdrop discs — rendered first (behind spheres) */}
+      <instancedMesh
+        ref={backdropRef}
+        args={[undefined, undefined, MAX_INSTANCES]}
+        frustumCulled={false}
+        renderOrder={0}
+      >
+        {/* Flat disc, radius 1 — scaled by instance matrix */}
+        <cylinderGeometry args={[1, 1, 0.005, 16]} />
+        <meshBasicMaterial
+          color="#000000"
           transparent
-          opacity={0.25}
+          opacity={0.65}
+          depthWrite={false}
+        />
+      </instancedMesh>
+
+      {/* Glow spheres */}
+      <instancedMesh
+        ref={meshRef}
+        args={[undefined, undefined, MAX_INSTANCES]}
+        frustumCulled={false}
+        renderOrder={1}
+      >
+        <sphereGeometry args={[1, 12, 12]} />
+        <meshStandardMaterial
+          color={ACTIVE_COLOR}
+          emissive={ACTIVE_EMISSIVE}
+          emissiveIntensity={2.5}
+          transparent
+          opacity={0.92}
           roughness={0.0}
           depthWrite={false}
         />
-      </mesh>
-
-      {/* Tight key light */}
-      <pointLight
-        ref={lightRef}
-        color={ACTIVE_COLOR}
-        intensity={2.0}
-        distance={1.8}
-        visible={false}
-      />
-
-      {/* Wide fill light */}
-      <pointLight
-        ref={fillRef}
-        color={ACTIVE_COLOR}
-        intensity={0.8}
-        distance={5.0}
-        visible={false}
-      />
+      </instancedMesh>
     </group>
+  );
+}
+
+/**
+ * FloatingNoteLabel
+ *
+ * Drei Text floating above the fretboard showing the current note name.
+ * Visibility is driven by the store subscription — Text renders when note
+ * is non-empty, hidden when silent. Drei handles its own material internally
+ * so we don't touch it imperatively.
+ */
+function FloatingNoteLabel() {
+  const note = useStore((s) => s.note);
+
+  if (!note) return null;
+
+  return (
+    <Text
+      position={[0, 0.6, 0]}
+      fontSize={0.35}
+      color={ACTIVE_COLOR}
+      anchorX="center"
+      anchorY="middle"
+    >
+      {note}
+    </Text>
   );
 }
 
@@ -346,7 +407,11 @@ export default function Fretboard() {
       <FretWires />
       <InlayDots />
       <Strings />
-      <ActiveFretMarker />
+      <ProbabilityHeatmap />
+      {/* Suspense required — Drei Text suspends while loading its font */}
+      <Suspense fallback={null}>
+        <FloatingNoteLabel />
+      </Suspense>
     </group>
   );
 }

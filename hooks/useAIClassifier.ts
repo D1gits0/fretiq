@@ -116,6 +116,7 @@ export function useAIClassifier() {
 
     (async () => {
       try {
+        console.log('[useAIClassifier] Loading model from:', MODEL_URL);
         const model = await tf.loadLayersModel(MODEL_URL);
         if (!cancelled) {
           // Warm up: run one dummy prediction so the first real frame isn't slow

@@ -7,13 +7,15 @@ import { useStore } from '@/store/useStore';
 
 /** One captured frame */
 interface Frame {
-  data: number[];     // 1024 frequency bins, 0–255
-  label: StringLabel; // which string was being played
-  preset: Preset;     // amp/tone preset at time of capture
+  data: number[];       // 1024 frequency bins, 0–255
+  label: StringLabel;   // which string was being played
+  preset: Preset;       // amp/tone preset at time of capture
+  mode: 'normal' | 'comparison'; // recording mode
 }
 
 type StringLabel = 'E2' | 'A2' | 'D3' | 'G3' | 'B3' | 'E4';
 type Preset      = 'Clean' | 'Crunch' | 'Lead' | 'Other';
+type RecordMode  = 'normal' | 'comparison';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -23,6 +25,12 @@ const PRESETS: Preset[]            = ['Clean', 'Crunch', 'Lead', 'Other'];
 /** Frame count targets shown in the progress indicators */
 const TARGET_GOOD = 5000;
 const TARGET_GREAT = 10000;
+
+/**
+ * Minimum mean frequency bin value (0–255) required to capture a frame.
+ * Frames where the mean is at or below this are silent and discarded.
+ */
+const SILENCE_GATE = 2.0;
 
 const STRING_COLOR: Record<StringLabel, { idle: string; active: string; track: string }> = {
   E2: { idle: 'rgba(239,68,68,0.12)',   active: '#ef4444', track: '#ef4444' },
@@ -35,22 +43,25 @@ const STRING_COLOR: Record<StringLabel, { idle: string; active: string; track: s
 
 // ─── Recording hook ───────────────────────────────────────────────────────────
 
-function useRecorder(activePreset: Preset) {
+function useRecorder(activePreset: Preset, activeMode: RecordMode) {
   const [counts, setCounts] = useState<Record<StringLabel, number>>({
     E2: 0, A2: 0, D3: 0, G3: 0, B3: 0, E4: 0,
   });
-  const [activeLabel, setActiveLabel] = useState<StringLabel | null>(null);
+  const [compCounts, setCompCounts] = useState<Record<StringLabel, number>>({
+    E2: 0, A2: 0, D3: 0, G3: 0, B3: 0, E4: 0,
+  });
+  const [activeLabel, setActiveLabel]       = useState<StringLabel | null>(null);
+  const [discardedCount, setDiscardedCount] = useState(0);
 
-  const samplesRef     = useRef<Frame[]>([]);
-  const activeLabelRef = useRef<StringLabel | null>(null);
-  // Keep a ref to the current preset so the RAF loop always reads the latest value
+  const samplesRef      = useRef<Frame[]>([]);
+  const activeLabelRef  = useRef<StringLabel | null>(null);
   const activePresetRef = useRef<Preset>(activePreset);
+  const activeModeRef   = useRef<RecordMode>(activeMode);
   const rafRef          = useRef<number | null>(null);
+  const discardedRef    = useRef(0);
 
-  // Sync preset ref whenever the prop changes
-  useEffect(() => {
-    activePresetRef.current = activePreset;
-  }, [activePreset]);
+  useEffect(() => { activePresetRef.current = activePreset; }, [activePreset]);
+  useEffect(() => { activeModeRef.current   = activeMode;   }, [activeMode]);
 
   const tick = useCallback(() => {
     const label = activeLabelRef.current;
@@ -59,12 +70,29 @@ function useRecorder(activePreset: Preset) {
     const { frequencyData } = useStore.getState();
 
     if (frequencyData.length > 0) {
-      samplesRef.current.push({
-        data:   Array.from(frequencyData),
-        label,
-        preset: activePresetRef.current,
-      });
-      setCounts((prev) => ({ ...prev, [label]: prev[label] + 1 }));
+      // ── Silence gate ────────────────────────────────────────────────────
+      // Compute mean bin value. Discard the frame if the signal is too quiet.
+      let sum = 0;
+      for (let i = 0; i < frequencyData.length; i++) sum += frequencyData[i];
+      const mean = sum / frequencyData.length;
+
+      if (mean <= SILENCE_GATE) {
+        discardedRef.current += 1;
+        setDiscardedCount(discardedRef.current);
+      } else {
+        const mode = activeModeRef.current;
+        samplesRef.current.push({
+          data:   Array.from(frequencyData),
+          label,
+          preset: activePresetRef.current,
+          mode,
+        });
+        if (mode === 'comparison') {
+          setCompCounts((prev) => ({ ...prev, [label]: prev[label] + 1 }));
+        } else {
+          setCounts((prev) => ({ ...prev, [label]: prev[label] + 1 }));
+        }
+      }
     }
 
     rafRef.current = requestAnimationFrame(tick);
@@ -102,7 +130,10 @@ function useRecorder(activePreset: Preset) {
   const clearAll = useCallback(() => {
     stopRecording();
     samplesRef.current = [];
+    discardedRef.current = 0;
     setCounts({ E2: 0, A2: 0, D3: 0, G3: 0, B3: 0, E4: 0 });
+    setCompCounts({ E2: 0, A2: 0, D3: 0, G3: 0, B3: 0, E4: 0 });
+    setDiscardedCount(0);
   }, [stopRecording]);
 
   useEffect(() => () => {
@@ -110,23 +141,37 @@ function useRecorder(activePreset: Preset) {
   }, []);
 
   const totalFrames = Object.values(counts).reduce((a, b) => a + b, 0);
+  const totalComp   = Object.values(compCounts).reduce((a, b) => a + b, 0);
 
-  return { samplesRef, counts, totalFrames, toggleRecording, clearAll, activeLabel };
+  return { samplesRef, counts, compCounts, totalFrames, totalComp, discardedCount, toggleRecording, clearAll, activeLabel };
 }
 
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 function exportJSON(frames: Frame[], totalFrames: number) {
-  const payload = {
-    exportedAt:  new Date().toISOString(),
+  // Build the JSON in chunks to avoid a single massive string allocation
+  // that crashes on large datasets (tens of thousands of frames).
+  const header = JSON.stringify({
+    exportedAt: new Date().toISOString(),
     totalFrames,
-    fftBins:     1024,
-    sampleRate:  44100,
-    fftSize:     2048,
-    frames,
-  };
+    fftBins:    1024,
+    sampleRate: 44100,
+    fftSize:    2048,
+  });
 
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  // Stream frames array manually: open bracket, one frame at a time, close bracket
+  const parts: BlobPart[] = [];
+  // Splice the closing "}" off the header and open the frames array inline
+  parts.push(header.slice(0, -1) + ',"frames":[');
+
+  for (let i = 0; i < frames.length; i++) {
+    parts.push(JSON.stringify(frames[i]));
+    if (i < frames.length - 1) parts.push(',');
+  }
+
+  parts.push(']}');
+
+  const blob = new Blob(parts, { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
@@ -184,10 +229,13 @@ function ProgressBar({ label, count, color }: { label: StringLabel; count: numbe
 
 export default function DataRecorder() {
   const isListening = useStore((s) => s.isListening);
-  const [preset, setPreset] = useState<Preset>('Clean');
+  const [preset, setPreset]   = useState<Preset>('Clean');
+  const [mode, setMode]       = useState<RecordMode>('normal');
 
-  const { samplesRef, counts, totalFrames, toggleRecording, clearAll, activeLabel } =
-    useRecorder(preset);
+  const { samplesRef, counts, compCounts, totalFrames, totalComp, discardedCount, toggleRecording, clearAll, activeLabel } =
+    useRecorder(preset, mode);
+
+  const grandTotal = totalFrames + totalComp;
 
   if (!isListening) {
     return (
@@ -203,7 +251,51 @@ export default function DataRecorder() {
       {/* Header */}
       <div style={styles.header}>
         <span style={styles.title}>String Recorder</span>
-        <span style={styles.totalBadge}>{totalFrames.toLocaleString()} frames</span>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <span style={styles.totalBadge}>{grandTotal.toLocaleString()} total</span>
+          {activeLabel && (
+            <span style={{
+              ...styles.totalBadge,
+              color: discardedCount > grandTotal ? '#f87171' : '#64748b',
+              borderColor: discardedCount > grandTotal ? '#7f1d1d' : '#1e293b',
+            }}>
+              {discardedCount.toLocaleString()} silent
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Mode toggle */}
+      <div style={styles.modeRow}>
+        {(['normal', 'comparison'] as RecordMode[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            style={{
+              ...styles.modeBtn,
+              background:  mode === m ? (m === 'comparison' ? '#7c3aed' : '#f1f5f9') : 'transparent',
+              color:       mode === m ? '#020617' : '#94a3b8',
+              borderColor: mode === m ? (m === 'comparison' ? '#7c3aed' : '#f1f5f9') : '#334155',
+            }}
+            aria-pressed={mode === m}
+          >
+            {m === 'normal' ? 'Normal Mode' : 'Comparison Mode'}
+          </button>
+        ))}
+      </div>
+
+      {/* Frame counters */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <span style={{ ...styles.totalBadge, flex: 1, textAlign: 'center' }}>
+          Normal: {totalFrames.toLocaleString()}
+        </span>
+        <span style={{
+          ...styles.totalBadge, flex: 1, textAlign: 'center',
+          color: totalComp > 0 ? '#a78bfa' : '#64748b',
+          borderColor: totalComp > 0 ? '#4c1d95' : '#1e293b',
+        }}>
+          Comparison: {totalComp.toLocaleString()}
+        </span>
       </div>
 
       {/* Preset selector */}
@@ -273,12 +365,12 @@ export default function DataRecorder() {
       {/* Actions */}
       <div style={styles.actionRow}>
         <button
-          onClick={() => exportJSON(samplesRef.current, totalFrames)}
-          disabled={totalFrames === 0}
+          onClick={() => exportJSON(samplesRef.current, grandTotal)}
+          disabled={grandTotal === 0}
           style={{
             ...styles.actionBtn, ...styles.exportBtn,
-            opacity: totalFrames === 0 ? 0.4 : 1,
-            cursor:  totalFrames === 0 ? 'default' : 'pointer',
+            opacity: grandTotal === 0 ? 0.4 : 1,
+            cursor:  grandTotal === 0 ? 'default' : 'pointer',
           }}
           aria-label="Export training data as JSON"
         >
@@ -287,11 +379,11 @@ export default function DataRecorder() {
 
         <button
           onClick={clearAll}
-          disabled={totalFrames === 0}
+          disabled={grandTotal === 0}
           style={{
             ...styles.actionBtn, ...styles.clearBtn,
-            opacity: totalFrames === 0 ? 0.4 : 1,
-            cursor:  totalFrames === 0 ? 'default' : 'pointer',
+            opacity: grandTotal === 0 ? 0.4 : 1,
+            cursor:  grandTotal === 0 ? 'default' : 'pointer',
           }}
           aria-label="Clear all recorded data"
         >
@@ -299,7 +391,7 @@ export default function DataRecorder() {
         </button>
       </div>
 
-      <p style={styles.hint}>Hold a string button while playing that string.</p>
+      <p style={styles.hint}>Click a string to start/stop recording. Silent frames are discarded.</p>
     </div>
   );
 }
@@ -348,6 +440,23 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: 8,
+  } satisfies React.CSSProperties,
+
+  modeRow: {
+    display: 'flex',
+    gap: 6,
+  } satisfies React.CSSProperties,
+
+  modeBtn: {
+    flex: 1,
+    padding: '5px 0',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+    fontFamily: 'monospace',
+    border: '1px solid',
+    borderRadius: 5,
+    cursor: 'pointer',
+    transition: 'background 100ms ease, color 100ms ease',
   } satisfies React.CSSProperties,
 
   presetLabel: {

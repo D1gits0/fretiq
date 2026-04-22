@@ -16,10 +16,10 @@ interface StyleConfig {
 }
 
 const STYLE_CONFIG: Record<GuitarStyle, StyleConfig> = {
-  Idle:    { emissive: '#0f172a', particleColor: '#334155' },
-  Shred:   { emissive: '#ea580c', particleColor: '#f97316' },
-  Ambient: { emissive: '#0e7490', particleColor: '#67e8f9' },
-  Chords:  { emissive: '#15803d', particleColor: '#4ade80' },
+  Idle:    { emissive: '#0f172a', particleColor: '#1e293b' },
+  Shred:   { emissive: '#ea580c', particleColor: '#7c2d12' },
+  Ambient: { emissive: '#0e7490', particleColor: '#164e63' },
+  Chords:  { emissive: '#15803d', particleColor: '#14532d' },
 };
 
 // ─── FrequencyRing ────────────────────────────────────────────────────────────
@@ -66,14 +66,14 @@ function FrequencyRing() {
           usage={THREE.DynamicDrawUsage}
         />
       </bufferGeometry>
-      <pointsMaterial size={0.04} sizeAttenuation color="#334155" />
+      <pointsMaterial size={0.04} sizeAttenuation transparent opacity={0.3} color="#334155" />
     </points>
   );
 }
 
 // ─── ParticleField ────────────────────────────────────────────────────────────
 
-const PARTICLE_COUNT = 600;
+const PARTICLE_COUNT = 200;
 
 function ParticleField() {
   const pointsRef = useRef<THREE.Points>(null);
@@ -120,7 +120,7 @@ function ParticleField() {
 
     const mat  = pointsRef.current.material as THREE.PointsMaterial;
     mat.color.copy(colorRef.current);
-    mat.size = 0.02 + intensity * 0.04;
+    mat.size = 0.008 + intensity * 0.008; // smaller, subtler
   });
 
   return (
@@ -128,7 +128,7 @@ function ParticleField() {
       <bufferGeometry>
         <bufferAttribute attach="attributes-position" args={[positions, 3]} />
       </bufferGeometry>
-      <pointsMaterial size={0.02} sizeAttenuation color="#334155" />
+      <pointsMaterial size={0.008} sizeAttenuation color="#1e293b" />
     </points>
   );
 }
