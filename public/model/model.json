@@ -13,7 +13,7 @@
           "config": {
             "batch_input_shape": [
               null,
-              13
+              26
             ],
             "dtype": "float32",
             "sparse": false,
@@ -29,7 +29,7 @@
             "name": "dense",
             "trainable": true,
             "dtype": "float32",
-            "units": 64,
+            "units": 128,
             "activation": "relu",
             "use_bias": true,
             "kernel_initializer": {
@@ -56,7 +56,7 @@
           "build_config": {
             "input_shape": [
               null,
-              13
+              26
             ]
           }
         },
@@ -75,7 +75,7 @@
           "build_config": {
             "input_shape": [
               null,
-              64
+              128
             ]
           }
         },
@@ -113,7 +113,7 @@
           "build_config": {
             "input_shape": [
               null,
-              64
+              128
             ]
           }
         },
@@ -188,22 +188,22 @@
         {
           "name": "dense/kernel:0",
           "shape": [
-            13,
-            64
+            26,
+            128
           ],
           "dtype": "float32"
         },
         {
           "name": "dense/bias:0",
           "shape": [
-            64
+            128
           ],
           "dtype": "float32"
         },
         {
           "name": "dense_1/kernel:0",
           "shape": [
-            64,
+            128,
             32
           ],
           "dtype": "float32"

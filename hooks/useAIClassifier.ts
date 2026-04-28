@@ -86,6 +86,54 @@ function classifyFrequencies(data: Uint8Array): StyleConfidence {
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
+// ─── Manual model loader ──────────────────────────────────────────────────────
+// Shared with usePitchDetection — same architecture, same weights.bin.
+// See usePitchDetection.ts for full weight layout documentation.
+
+const WEIGHT_SPECS_AC = [
+  { shape: [26, 128] as [number, number] },
+  { shape: [128]     as [number]         },
+  { shape: [128, 32] as [number, number] },
+  { shape: [32]      as [number]         },
+  { shape: [32, 6]   as [number, number] },
+  { shape: [6]       as [number]         },
+] as const;
+
+async function loadStringClassifier(tag: string): Promise<tf.Sequential | null> {
+  try {
+    const res = await fetch('/model/weights.bin');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+
+    const model = tf.sequential();
+    model.add(tf.layers.dense({ units: 128, activation: 'relu', inputShape: [26] }));
+    model.add(tf.layers.dropout({ rate: 0.3 }));
+    model.add(tf.layers.dense({ units: 32, activation: 'relu' }));
+    model.add(tf.layers.dropout({ rate: 0.2 }));
+    model.add(tf.layers.dense({ units: 6, activation: 'softmax' }));
+
+    const tensors: tf.Tensor[] = [];
+    let offset = 0;
+    for (const spec of WEIGHT_SPECS_AC) {
+      const nValues = spec.shape.reduce((a, b) => a * b, 1);
+      tensors.push(tf.tensor(Array.from(new Float32Array(buf, offset, nValues)), spec.shape));
+      offset += nValues * 4;
+    }
+    model.setWeights(tensors);
+    tensors.forEach(t => t.dispose());
+
+    const dummy = tf.zeros([1, 26]);
+    (model.predict(dummy) as tf.Tensor).dispose();
+    dummy.dispose();
+
+    console.log(`[${tag}] Model ready`);
+    return model;
+  } catch (err) {
+    console.info(`[${tag}] Model load failed:`, err);
+    return null;
+  }
+}
+
 /**
  * useAIClassifier
  *
@@ -111,36 +159,28 @@ export function useAIClassifier() {
   const setConfidence = useStore((s) => s.setConfidence);
 
   // ── Model load (once on mount) ─────────────────────────────────────────────
+  // useAIClassifier uses the same string classifier model as usePitchDetection.
+  // If the model isn't present or fails to load, falls back to heuristic silently.
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      try {
-        console.log('[useAIClassifier] Loading model from:', MODEL_URL);
-        const model = await tf.loadLayersModel(MODEL_URL);
-        if (!cancelled) {
-          // Warm up: run one dummy prediction so the first real frame isn't slow
-          const dummy = tf.zeros([1, 1024, 1]);
-          const warmup = model.predict(dummy) as tf.Tensor;
-          warmup.dispose();
-          dummy.dispose();
-
+      const model = await loadStringClassifier('useAIClassifier');
+      if (!cancelled) {
+        if (model) {
           modelRef.current = model;
-          console.info('[useAIClassifier] TF.js model loaded — using neural classifier');
-        }
-      } catch {
-        // Expected when model.json doesn't exist yet (pre-training).
-        // Also catches network errors, shape mismatches, corrupt weights, etc.
-        if (!cancelled) {
+          console.info('[useAIClassifier] Model ready — using neural classifier');
+        } else {
           modelFailed.current = true;
-          console.info('[useAIClassifier] Model not found — using heuristic classifier');
+          console.info('[useAIClassifier] Using heuristic classifier');
         }
+      } else {
+        model?.dispose();
       }
     })();
 
     return () => {
       cancelled = true;
-      // Dispose the model if it loaded, to free GPU/WASM memory
       if (modelRef.current) {
         modelRef.current.dispose();
         modelRef.current = null;

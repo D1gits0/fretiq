@@ -172,7 +172,140 @@ function StyleHUD() {
   );
 }
 
-// ─── KatanaScene ──────────────────────────────────────────────────────────────
+// ─── DebugOverlay ─────────────────────────────────────────────────────────────
+
+const STRING_LABELS = ['E2', 'A2', 'D3', 'G3', 'B3', 'E4'] as const;
+
+/**
+ * Live debug panel showing pitch detection state and per-string model confidence.
+ *
+ * Model vs heuristic is inferred from stringProbs:
+ *   - If the winning string has prob > 0.4 and the distribution is non-uniform
+ *     (max - min > 0.15 across valid candidates), it came from the model.
+ *   - Otherwise it's the heuristic synthesised distribution.
+ */
+function DebugOverlay() {
+  const note         = useStore((s) => s.note);
+  const frequency    = useStore((s) => s.frequency);
+  const fret         = useStore((s) => s.fret);
+  const string       = useStore((s) => s.string);
+  const stringProbs  = useStore((s) => s.stringProbs);
+  const intensity    = useStore((s) => s.intensity);
+
+  // Infer source from prob distribution shape
+  const validProbs   = stringProbs.filter((p) => p > 0);
+  const maxProb      = Math.max(...stringProbs);
+  const minValidProb = validProbs.length > 0 ? Math.min(...validProbs) : 0;
+  const isModel      = maxProb > 0.4 && (maxProb - minValidProb) > 0.15;
+  const source       = note ? (isModel ? 'model' : 'heuristic') : '—';
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 8,
+        left: 8,
+        zIndex: 9999,
+        background: 'rgba(0,0,0,0.82)',
+        border: '1px solid #334155',
+        borderRadius: 4,
+        padding: '6px 10px',
+        fontFamily: 'monospace',
+        fontSize: '11px',
+        lineHeight: '1.6',
+        color: '#94a3b8',
+        pointerEvents: 'none',
+        userSelect: 'none',
+        minWidth: 180,
+      }}
+    >
+      {/* Header row */}
+      <div style={{ color: '#64748b', marginBottom: 3, fontSize: '10px', letterSpacing: '0.05em' }}>
+        PITCH DEBUG
+      </div>
+
+      {/* Note + frequency */}
+      <div>
+        <span style={{ color: '#64748b' }}>note  </span>
+        <span style={{ color: note ? '#22d3ee' : '#475569', fontWeight: 700 }}>
+          {note || '—'}
+        </span>
+        {frequency > 0 && (
+          <span style={{ color: '#475569' }}> {frequency.toFixed(1)} Hz</span>
+        )}
+      </div>
+
+      {/* Fret */}
+      <div>
+        <span style={{ color: '#64748b' }}>fret  </span>
+        <span style={{ color: '#f1f5f9' }}>{fret >= 0 ? fret : '—'}</span>
+      </div>
+
+      {/* Intensity */}
+      <div>
+        <span style={{ color: '#64748b' }}>level </span>
+        <span style={{ color: '#f1f5f9' }}>{(intensity * 100).toFixed(0)}%</span>
+      </div>
+
+      {/* Source */}
+      <div>
+        <span style={{ color: '#64748b' }}>src   </span>
+        <span style={{ color: isModel ? '#4ade80' : '#facc15' }}>{source}</span>
+      </div>
+
+      {/* Divider */}
+      <div style={{ borderTop: '1px solid #1e293b', margin: '4px 0' }} />
+
+      {/* Per-string confidence */}
+      {STRING_LABELS.map((label, s) => {
+        const prob      = stringProbs[s] ?? 0;
+        const pct       = Math.round(prob * 100);
+        const isWinner  = s === string && note !== '';
+        const isValid   = prob > 0.001;
+        const barWidth  = Math.round(prob * 80); // max 80px bar
+
+        return (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {/* String label */}
+            <span style={{
+              width: 22,
+              color: isWinner ? '#4ade80' : isValid ? '#94a3b8' : '#334155',
+              fontWeight: isWinner ? 700 : 400,
+            }}>
+              {label}
+            </span>
+
+            {/* Bar */}
+            <div style={{
+              width: 80,
+              height: 5,
+              background: '#0f172a',
+              borderRadius: 2,
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                width: barWidth,
+                height: '100%',
+                background: isWinner ? '#4ade80' : '#334155',
+                borderRadius: 2,
+              }} />
+            </div>
+
+            {/* Percentage */}
+            <span style={{
+              width: 32,
+              textAlign: 'right',
+              color: isWinner ? '#4ade80' : isValid ? '#64748b' : '#1e293b',
+              fontWeight: isWinner ? 700 : 400,
+            }}>
+              {isValid ? `${pct}%` : ''}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function KatanaScene() {
   return (
@@ -209,6 +342,7 @@ export default function KatanaScene() {
       {/* DOM overlays — outside Canvas */}
       <NoteHUD />
       <StyleHUD />
+      <DebugOverlay />
     </div>
   );
 }

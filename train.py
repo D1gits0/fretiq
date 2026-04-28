@@ -1,15 +1,16 @@
 """
 train.py — Katana-Vision Model Trainer
 --------------------------------------
-Trains a 1D CNN on your recorded guitar sessions and exports
-directly to TF.js format (model.json + weights.bin) with zero
-dependency on the tensorflowjs CLI.
+Trains a dense network on engineered spectral features (band energies +
+spectral shape descriptors + MFCCs) extracted from recorded FFT frames,
+then exports directly to TF.js format (model.json + weights.bin).
 
 Usage:
     py -3.11 train.py --data session1.json session2.json --out ../public/model
 
 Requirements:
     py -3.11 -m pip install tensorflow-cpu==2.13.0 numpy scikit-learn
+    (No librosa needed — mel filterbanks and DCT are implemented manually)
 """
 
 import argparse
@@ -22,7 +23,7 @@ import tensorflow as tf
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 LABELS = ['E2', 'A2', 'D3', 'G3', 'B3', 'E4']
-INPUT_SIZE = 13   # engineered features, not raw bins (see extract_features)
+INPUT_SIZE = 26   # 8 band energies + 5 spectral descriptors + 13 MFCCs
 EPOCHS = 25
 BATCH_SIZE = 32
 VALIDATION_SPLIT = 0.2
@@ -41,17 +42,88 @@ BANDS = [
     (600, 1024), # Air
 ]
 
+# ── Mel filterbank (built once at import time) ────────────────────────────────
+# Parameters matching a 44.1kHz signal with fftSize=2048 (1024 bins).
+_N_BINS      = 1024
+_SAMPLE_RATE = 44100
+_N_MELS      = 40    # number of mel filterbanks
+_N_MFCC      = 13    # DCT coefficients to keep
+
+def _hz_to_mel(hz: float) -> float:
+    return 2595.0 * np.log10(1.0 + hz / 700.0)
+
+def _mel_to_hz(mel: float) -> float:
+    return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
+
+def _build_mel_filterbank(n_bins: int, n_mels: int, sr: int) -> np.ndarray:
+    """
+    Build a (n_mels, n_bins) matrix of triangular mel filterbanks.
+
+    Each row is one filter: a triangle that peaks at the corresponding mel
+    frequency and tapers to zero at the adjacent mel centre frequencies.
+    This is the standard librosa-style mel filterbank construction.
+    """
+    # Frequency of each FFT bin (Hz)
+    fft_freqs = np.linspace(0, sr / 2, n_bins)
+
+    # n_mels + 2 evenly-spaced points in mel space, converted back to Hz
+    mel_min  = _hz_to_mel(0.0)
+    mel_max  = _hz_to_mel(sr / 2)
+    mel_pts  = np.linspace(mel_min, mel_max, n_mels + 2)
+    hz_pts   = np.array([_mel_to_hz(m) for m in mel_pts])
+
+    filters = np.zeros((n_mels, n_bins), dtype=np.float32)
+    for m in range(n_mels):
+        f_left   = hz_pts[m]
+        f_center = hz_pts[m + 1]
+        f_right  = hz_pts[m + 2]
+
+        # Rising slope
+        rising  = (fft_freqs - f_left)  / max(f_center - f_left,  1e-10)
+        # Falling slope
+        falling = (f_right - fft_freqs) / max(f_right  - f_center, 1e-10)
+
+        filters[m] = np.maximum(0, np.minimum(rising, falling))
+
+    return filters   # shape: (n_mels, n_bins)
+
+# Pre-compute filterbank and DCT matrix once — not per frame
+_MEL_FILTERBANK = _build_mel_filterbank(_N_BINS, _N_MELS, _SAMPLE_RATE)
+
+def _build_dct_matrix(n_mels: int, n_mfcc: int) -> np.ndarray:
+    """
+    Build a (n_mfcc, n_mels) DCT-II matrix (orthonormal, librosa-compatible).
+
+    DCT-II: C[k, n] = cos(pi * k * (2n + 1) / (2 * N))
+    Orthonormal scaling: first row × 1/sqrt(N), rest × sqrt(2/N).
+    """
+    n   = np.arange(n_mels, dtype=np.float64)
+    k   = np.arange(n_mfcc, dtype=np.float64)[:, np.newaxis]
+    dct = np.cos(np.pi * k * (2 * n + 1) / (2 * n_mels))
+    dct[0]  *= 1.0 / np.sqrt(n_mels)
+    dct[1:] *= np.sqrt(2.0 / n_mels)
+    return dct.astype(np.float32)   # shape: (n_mfcc, n_mels)
+
+_DCT_MATRIX = _build_dct_matrix(_N_MELS, _N_MFCC)
+
+
 def extract_features(bins: np.ndarray) -> np.ndarray:
     """
-    Transform a 1024-bin FFT frame into a 13-element feature vector.
+    Transform a 1024-bin FFT frame into a 26-element feature vector.
 
     Features (in order):
-      0–7  : energy in each of the 8 frequency bands (sum of bins, normalised)
-      8    : spectral centroid (weighted mean bin index, normalised to [0, 1])
-      9    : spectral rolloff  (bin below which 85% of energy falls, normalised)
-      10   : spectral flatness (geometric mean / arithmetic mean)
-      11   : peak bin index    (normalised to [0, 1])
-      12   : peak bin value    (normalised to [0, 1])
+      0–7   : energy in each of the 8 frequency bands (normalised by total)
+      8     : spectral centroid (weighted mean bin index, normalised to [0, 1])
+      9     : spectral rolloff  (bin below which 85% of energy falls, normalised)
+      10    : spectral flatness (geometric mean / arithmetic mean)
+      11    : peak bin index    (normalised to [0, 1])
+      12    : peak bin value    (normalised to [0, 1], bins are 0–255)
+      13–25 : 13 MFCCs computed from 40 mel filterbanks applied to the FFT
+
+    The MFCC pipeline (no librosa required):
+      1. Apply mel filterbank matrix to FFT bins → 40 mel energies
+      2. Log-compress: log(mel_energy + 1e-6)
+      3. DCT-II (orthonormal) → keep first 13 coefficients
     """
     bins = bins.astype(np.float64)
     total_energy = bins.sum()
@@ -60,49 +132,60 @@ def extract_features(bins: np.ndarray) -> np.ndarray:
     band_energies = np.array(
         [bins[lo:hi].sum() for lo, hi in BANDS], dtype=np.float64
     )
-    # Normalise by total energy so the vector is scale-invariant
     if total_energy > 0:
         band_energies /= total_energy
 
     # ── Spectral centroid (8) ─────────────────────────────────────────────
     if total_energy > 0:
-        indices = np.arange(len(bins), dtype=np.float64)
+        indices  = np.arange(len(bins), dtype=np.float64)
         centroid = (indices * bins).sum() / total_energy
     else:
         centroid = 0.0
-    centroid_norm = centroid / (len(bins) - 1)   # normalise to [0, 1]
+    centroid_norm = centroid / (len(bins) - 1)
 
     # ── Spectral rolloff (9) ──────────────────────────────────────────────
     if total_energy > 0:
-        cumsum = np.cumsum(bins)
-        rolloff_idx = np.searchsorted(cumsum, 0.85 * total_energy)
+        cumsum      = np.cumsum(bins)
+        rolloff_idx = int(np.searchsorted(cumsum, 0.85 * total_energy))
     else:
         rolloff_idx = 0
     rolloff_norm = rolloff_idx / (len(bins) - 1)
 
     # ── Spectral flatness (10) ────────────────────────────────────────────
-    # Ratio of geometric mean to arithmetic mean.
-    # 1.0 = white noise (flat), 0.0 = pure tone (single spike).
-    eps = 1e-10
+    eps        = 1e-10
     arith_mean = bins.mean() + eps
-    # Geometric mean via log-space to avoid underflow on large arrays
-    log_mean = np.exp(np.log(bins + eps).mean())
-    flatness = float(np.clip(log_mean / arith_mean, 0.0, 1.0))
+    log_mean   = np.exp(np.log(bins + eps).mean())
+    flatness   = float(np.clip(log_mean / arith_mean, 0.0, 1.0))
 
     # ── Peak bin (11, 12) ─────────────────────────────────────────────────
-    peak_idx = int(np.argmax(bins))
-    peak_val = float(bins[peak_idx])
+    peak_idx      = int(np.argmax(bins))
+    peak_val      = float(bins[peak_idx])
     peak_idx_norm = peak_idx / (len(bins) - 1)
-    peak_val_norm = peak_val / 255.0   # bins are 0–255
+    peak_val_norm = peak_val / 255.0
+
+    # ── MFCCs (13–25) ─────────────────────────────────────────────────────
+    # 1. Apply mel filterbank: (n_mels, n_bins) @ bins → (n_mels,)
+    mel_energies = _MEL_FILTERBANK @ bins.astype(np.float32)
+
+    # 2. Log compression (floor at 1e-6 to avoid log(0))
+    log_mel = np.log(mel_energies + 1e-6)
+
+    # 3. DCT-II: (n_mfcc, n_mels) @ log_mel → (n_mfcc,)
+    mfccs = _DCT_MATRIX @ log_mel   # shape: (13,)
+
+    # Normalise MFCCs to roughly [-1, 1] — the raw values can be large
+    # (typically -20 to +20 for log-mel). Divide by 20 as a stable scale.
+    mfccs_norm = np.clip(mfccs / 20.0, -1.0, 1.0)
 
     return np.array([
-        *band_energies,      # 8 values
+        *band_energies,      # 8
         centroid_norm,       # 1
         rolloff_norm,        # 1
         flatness,            # 1
         peak_idx_norm,       # 1
         peak_val_norm,       # 1
-    ], dtype=np.float32)     # total: 13
+        *mfccs_norm,         # 13
+    ], dtype=np.float32)     # total: 26
 
 
 # ─── Load Data ────────────────────────────────────────────────────────────────
@@ -138,14 +221,14 @@ def load_sessions(paths):
 
             preset = frame.get('preset', 'unknown')
 
-            # Extract 13 engineered features from the raw 1024-bin FFT frame
-            raw = np.array(data, dtype=np.float32)
-            if len(raw) < 1024:
-                raw = np.pad(raw, (0, 1024 - len(raw)))
+            # Extract 26 engineered features from the raw 1024-bin FFT frame
+            raw_bins = np.array(data, dtype=np.float32)
+            if len(raw_bins) < 1024:
+                raw_bins = np.pad(raw_bins, (0, 1024 - len(raw_bins)))
             else:
-                raw = raw[:1024]
+                raw_bins = raw_bins[:1024]
 
-            X.append(extract_features(raw))
+            X.append(extract_features(raw_bins))
             Y.append(LABELS.index(label))
             preset_counts[preset] = preset_counts.get(preset, 0) + 1
 
@@ -175,19 +258,19 @@ def load_sessions(paths):
 
 def build_model():
     """
-    Small dense network trained on 13 engineered spectral features.
+    Dense network trained on 26 engineered spectral features.
 
-    Using engineered features instead of raw 1024-bin FFT vectors:
-    - Dramatically reduces input dimensionality (1024 → 13)
-    - Features are physically meaningful (band energy, centroid, etc.)
-    - Trains faster, generalises better on small datasets
-    - Runs in microseconds in the browser
+    Feature breakdown:
+      8  band energies  — coarse spectral shape
+      5  descriptors    — centroid, rolloff, flatness, peak index, peak value
+      13 MFCCs          — timbral texture via mel-scale cepstral analysis
 
+    First Dense layer widened to 128 to handle the larger input.
     Output: softmax over 6 classes (E2, A2, D3, G3, B3, E4).
     """
     model = tf.keras.Sequential([
         tf.keras.layers.Input(shape=(INPUT_SIZE,)),
-        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(128, activation='relu'),
         tf.keras.layers.Dropout(0.3),
         tf.keras.layers.Dense(32, activation='relu'),
         tf.keras.layers.Dropout(0.2),
