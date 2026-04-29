@@ -38,10 +38,12 @@ A guitar amp or audio interface with USB output (tested on Boss Katana Gen 3)
 Chrome browser (Web Audio API most reliable)
 
 Install and run:
-bashgit clone https://github.com/yourusername/fretiq
+\`\`\`bash
+git clone https://github.com/yourusername/fretiq
 cd fretiq
 npm install
 npm run dev
+\`\`\`
 Open http://localhost:3000, click Connect, select your audio interface from the browser mic picker, and play.
 
 Training your own model
