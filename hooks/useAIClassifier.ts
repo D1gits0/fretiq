@@ -159,28 +159,11 @@ export function useAIClassifier() {
   const setConfidence = useStore((s) => s.setConfidence);
 
   // ── Model load (once on mount) ─────────────────────────────────────────────
-  // useAIClassifier uses the same string classifier model as usePitchDetection.
-  // If the model isn't present or fails to load, falls back to heuristic silently.
+  // The string classifier model (26-feature dense) is not compatible with the
+  // style classifier's heuristic input format. Style classification always uses
+  // the heuristic — no model load needed here.
   useEffect(() => {
-    let cancelled = false;
-
-    (async () => {
-      const model = await loadStringClassifier('useAIClassifier');
-      if (!cancelled) {
-        if (model) {
-          modelRef.current = model;
-          console.info('[useAIClassifier] Model ready — using neural classifier');
-        } else {
-          modelFailed.current = true;
-          console.info('[useAIClassifier] Using heuristic classifier');
-        }
-      } else {
-        model?.dispose();
-      }
-    })();
-
     return () => {
-      cancelled = true;
       if (modelRef.current) {
         modelRef.current.dispose();
         modelRef.current = null;
@@ -211,26 +194,9 @@ export function useAIClassifier() {
         return;
       }
 
-      // ── Classify: model if loaded, heuristic otherwise ───────────────────
-      let raw: StyleConfidence;
-
-      if (modelRef.current) {
-        // Neural path — runs inside tf.tidy() so intermediate tensors are
-        // automatically disposed; only the extracted JS values escape.
-        const [shred, ambient, chords] = tf.tidy(() => {
-          // Normalise bins to [0, 1] and reshape to (1, 1024, 1) for Conv1D
-          const input = tf.tensor(Array.from(frequencyData), [1, 1024, 1], 'float32')
-                          .div(255) as tf.Tensor3D;
-          const output = modelRef.current!.predict(input) as tf.Tensor2D;
-          // dataSync() blocks the JS thread briefly — acceptable at 60fps for
-          // a 3-element output; use .data() + await if this ever becomes a bottleneck
-          return Array.from(output.dataSync()) as [number, number, number];
-        });
-        raw = { Shred: shred, Ambient: ambient, Chords: chords };
-      } else {
-        // Heuristic path (model not loaded yet, or load failed)
-        raw = classifyFrequencies(frequencyData);
-      }
+      // Style classification always uses the heuristic — the loaded model is
+      // the string classifier (26-feature dense) and is not compatible here.
+      const raw = classifyFrequencies(frequencyData);
 
       // Smooth confidence scores to avoid jittery style flipping
       smoothedConfidence.current = {
