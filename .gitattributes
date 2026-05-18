@@ -1,0 +1,3 @@
+# Prevent git from mangling config files
+*.mjs  binary
+*.cjs  binary
