@@ -1,0 +1,4 @@
+Condition,E2,A2,D3,G3,B3,E4,Overall
+A: 13-feat, all data,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+B: 26-feat, clean+open only,98.6,96.8,95.3,98.5,99.1,98.6,97.8
+C: 26-feat, all data (full model),98.3,96.3,96.7,97.1,97.9,98.9,97.5

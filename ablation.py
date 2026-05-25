@@ -193,9 +193,42 @@ def build_model(input_size: int) -> tf.keras.Model:
     return model
 
 
+# ─── Confusion matrix ─────────────────────────────────────────────────────────
+
+def print_confusion_matrix(Y_true: np.ndarray, Y_pred: np.ndarray) -> None:
+    """Print a 6×6 confusion matrix with raw counts, rows=True, cols=Pred."""
+    n = len(LABELS)
+    cm = np.zeros((n, n), dtype=int)
+    for t, p in zip(Y_true, Y_pred):
+        cm[t, p] += 1
+
+    col_w = 7  # width per cell
+    header_pad = 10  # width of the row-label column
+
+    # Header
+    print(f"\n{'':>{header_pad}}", end="")
+    print("  Pred →")
+    print(f"{'True ↓':>{header_pad}}", end="")
+    for label in LABELS:
+        print(f"{label:>{col_w}}", end="")
+    print()
+
+    # Separator
+    print(" " * header_pad + "-" * (col_w * n))
+
+    # Rows
+    for i, label in enumerate(LABELS):
+        print(f"{label:>{header_pad}}", end="")
+        for j in range(n):
+            print(f"{cm[i, j]:>{col_w}}", end="")
+        print()
+    print()
+
+
 # ─── Training run ─────────────────────────────────────────────────────────────
 
-def run_experiment(name: str, X: np.ndarray, Y: np.ndarray) -> dict[str, float]:
+def run_experiment(name: str, X: np.ndarray, Y: np.ndarray,
+                   confusion: bool = False) -> dict[str, float]:
     print(f"\n{'='*55}")
     print(f"  {name}  ({len(X):,} frames, {X.shape[1]} features)")
     print(f"{'='*55}")
@@ -244,6 +277,9 @@ def run_experiment(name: str, X: np.ndarray, Y: np.ndarray) -> dict[str, float]:
     results['Overall'] = overall
     print(f"  {'Overall':6}  {int((Y_pred==Y_val).sum()):>5}/{n_val:<5}  {overall*100:5.1f}%")
 
+    if confusion:
+        print_confusion_matrix(Y_val, Y_pred)
+
     tf.keras.backend.clear_session()
     return results
 
@@ -256,30 +292,37 @@ def main():
                         metavar='FILE', help='Clean/open session JSON files')
     parser.add_argument('--comparison', nargs='+', required=True,
                         metavar='FILE', help='Comparison session JSON files')
+    parser.add_argument('--skip-a', action='store_true',
+                        help='Skip condition A (13-feat) to save time')
     args = parser.parse_args()
 
     all_files = args.clean + args.comparison
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    print("\nLoading data for Experiment A (13-feat, all data)...")
-    X_all_13, Y_all = load_files(all_files, extract_features_13)
+    if not args.skip_a:
+        print("\nLoading data for Experiment A (13-feat, all data)...")
+        X_all_13, Y_all_13 = load_files(all_files, extract_features_13)
 
     print("\nLoading data for Experiment B (26-feat, clean only)...")
     X_clean_26, Y_clean = load_files(args.clean, extract_features_26)
 
     print("\nLoading data for Experiment C (26-feat, all data)...")
-    X_all_26, _ = load_files(all_files, extract_features_26)
-    # Y_all is the same regardless of feature set
+    X_all_26, Y_all_26 = load_files(all_files, extract_features_26)
 
     # ── Run experiments ───────────────────────────────────────────────────────
-    res_A = run_experiment(
-        "A: 13 features, all data (no MFCCs)", X_all_13, Y_all)
+    res_A = {}
+    if not args.skip_a:
+        res_A = run_experiment(
+            "A: 13 features, all data (no MFCCs)", X_all_13, Y_all_13,
+            confusion=False)
 
     res_B = run_experiment(
-        "B: 26 features, clean+open only (no comparison)", X_clean_26, Y_clean)
+        "B: 26 features, clean+open only (no comparison)", X_clean_26, Y_clean,
+        confusion=True)
 
     res_C = run_experiment(
-        "C: 26 features, all data (full model)", X_all_26, Y_all)
+        "C: 26 features, all data (full model)", X_all_26, Y_all_26,
+        confusion=True)
 
     # ── Print comparison table ────────────────────────────────────────────────
     cols   = LABELS + ['Overall']
@@ -298,6 +341,9 @@ def main():
         ("C: 26-feat, all data (full model)",  res_C),
     ]
     for label, res in rows:
+        if not res:
+            print(f"{'  ' + label:<42} (skipped)")
+            continue
         vals = "  ".join(f"{res.get(c, 0)*100:5.1f}%" for c in cols)
         print(f"{label:<42} {vals}")
 
