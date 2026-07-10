@@ -5,7 +5,7 @@ import { useStore } from '@/store/useStore';
 import { useKatanaAudio } from '@/hooks/useKatanaAudio';
 import { useAIClassifier } from '@/hooks/useAIClassifier';
 import { usePitchDetection } from '@/hooks/usePitchDetection';
-import DataRecorder from '@/components/DataRecorder';
+import DataRecorder, { FreePlayRecorder } from '@/components/DataRecorder';
 
 // KatanaScene uses R3F — must be client-only, no SSR
 const KatanaScene = dynamic(() => import('@/components/KatanaScene'), { ssr: false });
@@ -86,6 +86,9 @@ export default function Page() {
       {isListening && (
         <div style={styles.recorderAnchor}>
           <DataRecorder />
+          <div style={{ marginTop: 10 }}>
+            <FreePlayRecorder />
+          </div>
         </div>
       )}
     </div>

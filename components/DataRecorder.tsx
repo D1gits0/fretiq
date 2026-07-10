@@ -396,6 +396,288 @@ export default function DataRecorder() {
   );
 }
 
+// ─── Free Play Recorder ───────────────────────────────────────────────────────
+// Completely independent from the per-string recorder above.
+// One record toggle + live string selector. Exports as free_playing.json.
+
+interface FreePlayFrame {
+  data: number[];
+  label: StringLabel;
+  preset: string;
+  mode: 'freeplay';
+}
+
+function useFreePlayRecorder() {
+  const [isRecording, setIsRecording]   = useState(false);
+  const [activeLabel, setActiveLabel]   = useState<StringLabel>('E2');
+  const [counts, setCounts]             = useState<Record<StringLabel, number>>(
+    { E2: 0, A2: 0, D3: 0, G3: 0, B3: 0, E4: 0 },
+  );
+
+  const framesRef      = useRef<FreePlayFrame[]>([]);
+  const rafRef         = useRef<number | null>(null);
+  const activeLabelRef = useRef<StringLabel>('E2');
+  const isRecordingRef = useRef(false);
+
+  // Keep ref in sync so the RAF loop always reads the latest label
+  const switchLabel = useCallback((label: StringLabel) => {
+    activeLabelRef.current = label;
+    setActiveLabel(label);
+  }, []);
+
+  const tick = useCallback(() => {
+    if (!isRecordingRef.current) return;
+
+    const { frequencyData } = useStore.getState();
+
+    if (frequencyData.length > 0) {
+      let sum = 0;
+      for (let i = 0; i < frequencyData.length; i++) sum += frequencyData[i];
+      const mean = sum / frequencyData.length;
+
+      if (mean > SILENCE_GATE) {
+        const label = activeLabelRef.current;
+        framesRef.current.push({
+          data:   Array.from(frequencyData),
+          label,
+          preset: 'Clean',
+          mode:   'freeplay',
+        });
+        setCounts(prev => ({ ...prev, [label]: prev[label] + 1 }));
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+  }, []);
+
+  const startRecording = useCallback(() => {
+    isRecordingRef.current = true;
+    setIsRecording(true);
+    rafRef.current = requestAnimationFrame(tick);
+  }, [tick]);
+
+  const stopRecording = useCallback(() => {
+    isRecordingRef.current = false;
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    setIsRecording(false);
+  }, []);
+
+  const toggleRecording = useCallback(() => {
+    isRecordingRef.current ? stopRecording() : startRecording();
+  }, [startRecording, stopRecording]);
+
+  const clearAll = useCallback(() => {
+    stopRecording();
+    framesRef.current = [];
+    setCounts({ E2: 0, A2: 0, D3: 0, G3: 0, B3: 0, E4: 0 });
+  }, [stopRecording]);
+
+  useEffect(() => () => {
+    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  const totalFrames = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  return { framesRef, counts, totalFrames, isRecording, activeLabel,
+           toggleRecording, switchLabel, clearAll };
+}
+
+function exportFreePlay(frames: FreePlayFrame[], totalFrames: number) {
+  const payload = {
+    exportedAt:  new Date().toISOString(),
+    totalFrames,
+    fftBins:     1024,
+    sampleRate:  44100,
+    fftSize:     2048,
+    frames,
+  };
+
+  // Chunked Blob — same approach as main exportJSON
+  const header = JSON.stringify({
+    exportedAt:  payload.exportedAt,
+    totalFrames: payload.totalFrames,
+    fftBins:     payload.fftBins,
+    sampleRate:  payload.sampleRate,
+    fftSize:     payload.fftSize,
+  });
+
+  const parts: BlobPart[] = [header.slice(0, -1) + ',"frames":['];
+  for (let i = 0; i < frames.length; i++) {
+    parts.push(JSON.stringify(frames[i]));
+    if (i < frames.length - 1) parts.push(',');
+  }
+  parts.push(']}');
+
+  const blob = new Blob(parts, { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'free_playing.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function FreePlayRecorder() {
+  const isListening = useStore((s) => s.isListening);
+  const { framesRef, counts, totalFrames, isRecording, activeLabel,
+          toggleRecording, switchLabel, clearAll } = useFreePlayRecorder();
+
+  if (!isListening) {
+    return (
+      <div style={fpStyles.panel}>
+        <p style={styles.disabledMsg}>Connect Katana to start recording.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={fpStyles.panel} aria-label="Free play recorder">
+
+      {/* Header */}
+      <div style={styles.header}>
+        <span style={{ ...styles.title, color: '#f59e0b' }}>Free Play Recorder</span>
+        <span style={styles.totalBadge}>{totalFrames.toLocaleString()} frames</span>
+      </div>
+
+      {/* Record toggle */}
+      <button
+        onClick={toggleRecording}
+        style={{
+          width: '100%',
+          padding: '10px 0',
+          fontFamily: 'monospace',
+          fontWeight: 700,
+          fontSize: '0.9rem',
+          border: '1px solid',
+          borderRadius: 7,
+          cursor: 'pointer',
+          transition: 'background 100ms ease',
+          background:   isRecording ? '#ef4444' : 'rgba(239,68,68,0.12)',
+          borderColor:  isRecording ? '#ef4444' : '#dc2626',
+          color:        isRecording ? '#020617' : '#f1f5f9',
+        }}
+        aria-pressed={isRecording}
+      >
+        {isRecording ? '⏹ Stop Recording' : '⏺ Record Free Play'}
+      </button>
+
+      {/* String selector — always active, switches label mid-recording */}
+      <div style={{ ...styles.stringGrid, marginTop: 4 }}>
+        {STRING_LABELS.map((label) => {
+          const isActive = activeLabel === label;
+          const cfg      = STRING_COLOR[label];
+          return (
+            <button
+              key={label}
+              onClick={() => switchLabel(label)}
+              style={{
+                ...styles.stringBtn,
+                background:  isActive ? cfg.active : cfg.idle,
+                borderColor: isActive ? cfg.active : cfg.track,
+                color:       isActive ? '#020617' : '#f1f5f9',
+                transform:   isActive ? 'scale(0.95)' : 'scale(1)',
+                outline:     isRecording && isActive
+                               ? `2px solid ${cfg.active}` : 'none',
+              }}
+              aria-pressed={isActive}
+              aria-label={`Label as ${label}`}
+            >
+              <span style={styles.stringBtnLabel}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Per-string frame counts */}
+      <div style={fpStyles.countGrid}>
+        {STRING_LABELS.map((label) => {
+          const cfg = STRING_COLOR[label];
+          return (
+            <div key={label} style={fpStyles.countItem}>
+              <span style={{ color: cfg.track, fontWeight: 700 }}>{label}</span>
+              <span style={{ color: '#64748b' }}>
+                {counts[label] >= 1000
+                  ? `${(counts[label] / 1000).toFixed(1)}k`
+                  : counts[label]}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Actions */}
+      <div style={styles.actionRow}>
+        <button
+          onClick={() => exportFreePlay(framesRef.current, totalFrames)}
+          disabled={totalFrames === 0}
+          style={{
+            ...styles.actionBtn, ...styles.exportBtn,
+            opacity: totalFrames === 0 ? 0.4 : 1,
+            cursor:  totalFrames === 0 ? 'default' : 'pointer',
+          }}
+          aria-label="Export free play data as free_playing.json"
+        >
+          ↓ Export free_playing.json
+        </button>
+        <button
+          onClick={clearAll}
+          disabled={totalFrames === 0}
+          style={{
+            ...styles.actionBtn, ...styles.clearBtn,
+            opacity: totalFrames === 0 ? 0.4 : 1,
+            cursor:  totalFrames === 0 ? 'default' : 'pointer',
+          }}
+        >
+          ✕ Clear
+        </button>
+      </div>
+
+      <p style={styles.hint}>
+        Hit record, play freely. Click a string button to switch the label — no need to stop.
+      </p>
+    </div>
+  );
+}
+
+const fpStyles = {
+  panel: {
+    ...({
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 10,
+      padding: '14px 16px',
+      background: 'rgba(2, 6, 23, 0.88)',
+      border: '1px solid #292524',
+      borderRadius: 10,
+      backdropFilter: 'blur(8px)',
+      fontFamily: 'monospace',
+      color: '#f1f5f9',
+      width: 300,
+    } satisfies React.CSSProperties),
+  },
+
+  countGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(6, 1fr)',
+    gap: 4,
+    fontSize: '0.7rem',
+    textAlign: 'center',
+  } satisfies React.CSSProperties,
+
+  countItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 2,
+    padding: '4px 0',
+    background: '#0f172a',
+    borderRadius: 4,
+  } satisfies React.CSSProperties,
+} as const;
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = {

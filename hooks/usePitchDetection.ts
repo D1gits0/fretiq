@@ -28,8 +28,8 @@ const FFT_SIZE    = 2048; // must match useKatanaAudio — time-domain buffer si
 const CLARITY_BANDS: ReadonlyArray<{ maxHz: number; threshold: number }> = [
   { maxHz: 200,      threshold: 0.90 },
   { maxHz: 500,      threshold: 0.86 },
-  { maxHz: 800,      threshold: 0.80 },
-  { maxHz: Infinity, threshold: 0.72 },
+  { maxHz: 800,      threshold: 0.76 },  // relaxed from 0.80 — B3/E4 on clean preset
+  { maxHz: Infinity, threshold: 0.68 },  // relaxed from 0.72 — high frets on E4
 ];
 
 function clarityThresholdForFreq(hz: number): number {
@@ -41,7 +41,7 @@ function clarityThresholdForFreq(hz: number): number {
 
 const MIN_FREQ_HZ             = 70;
 const MAX_FREQ_HZ             = 1200;
-const PITCH_SILENCE_THRESHOLD = 0.01;
+const PITCH_SILENCE_THRESHOLD = 0.005;
 const NOTE_SUSTAIN_MS         = 400;
 const DEBOUNCE_FRAMES         = 3;
 
@@ -408,7 +408,10 @@ export function usePitchDetection(getAnalyser: () => AnalyserNode | null) {
   // null = loading, false = failed, LayersModel = ready
   const modelRef       = useRef<tf.LayersModel | null>(null);
   const modelFailedRef = useRef(false);
-  const featuresLoggedRef = useRef(false); // fires the feature debug log once
+  const featuresLoggedRef = useRef(false);
+  const latencyProfilerRef = useRef<{ samples: number[]; done: boolean }>({
+    samples: [], done: false,
+  });
 
   const lastValidDetectionRef   = useRef<number>(0);
   const committedMidiRef        = useRef<number>(-1);
@@ -563,27 +566,35 @@ export function usePitchDetection(getAnalyser: () => AnalyserNode | null) {
       if (model) {
         // Model path — read freq-domain data and extract 26 features
         analyser.getByteFrequencyData(freqBufRef.current as Uint8Array<ArrayBuffer>);
+
+        // ── Latency profiler — logs avg after 200 frames, then stops ─────
+        const t0 = performance.now();
         const features = extractFeatures(freqBufRef.current);
-
-        // Debug: log features once so you can compare with train.py output
-        if (!featuresLoggedRef.current) {
-          featuresLoggedRef.current = true;
-          console.log('[usePitchDetection] 26 features for this frame:');
-          console.log('  bands(0-7):', features.slice(0, 8).map(v => v.toFixed(4)));
-          console.log('  centroid(8):', features[8].toFixed(4));
-          console.log('  rolloff(9):', features[9].toFixed(4));
-          console.log('  flatness(10):', features[10].toFixed(4));
-          console.log('  peakIdx(11):', features[11].toFixed(4));
-          console.log('  peakVal(12):', features[12].toFixed(4));
-          console.log('  mfccs(13-25):', features.slice(13, 26).map(v => v.toFixed(4)));
-          console.log('  total features:', features.length);
-        }
-
         const rawProbs = tf.tidy(() => {
           const input  = tf.tensor2d([features], [1, 26]);
           const output = model.predict(input) as tf.Tensor2D;
           return Array.from(output.dataSync()) as number[];
         });
+        const elapsed = performance.now() - t0;
+
+        if (!latencyProfilerRef.current.done) {
+          const p = latencyProfilerRef.current;
+          p.samples.push(elapsed);
+          if (p.samples.length >= 200) {
+            p.done = true;
+            const avg = p.samples.reduce((a, b) => a + b, 0) / p.samples.length;
+            const min = Math.min(...p.samples);
+            const max = Math.max(...p.samples);
+            const p95 = [...p.samples].sort((a,b)=>a-b)[Math.floor(p.samples.length*0.95)];
+            console.log(
+              `[Fretiq latency] feature extraction + model.predict — 200 frames\n` +
+              `  avg: ${avg.toFixed(2)} ms\n` +
+              `  min: ${min.toFixed(2)} ms\n` +
+              `  max: ${max.toFixed(2)} ms\n` +
+              `  p95: ${p95.toFixed(2)} ms`
+            );
+          }
+        }
 
         console.log('raw model output:', rawProbs.map(v => v.toFixed(4)));
 
