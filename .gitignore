@@ -6,3 +6,9 @@ dist
 build
 *.log
 /data
+
+# Paper data and results
+*.docx
+*.csv
+ablation_results.csv
+data/free_playing.json

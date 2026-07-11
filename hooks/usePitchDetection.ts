@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useEffect, useRef } from 'react';
 import * as tf from '@tensorflow/tfjs';
@@ -522,7 +522,6 @@ export function usePitchDetection(getAnalyser: () => AnalyserNode | null) {
           const output = modelRef.current!.predict(input) as tf.Tensor2D;
           return Array.from(output.dataSync());
         });
-        console.log('softmax:', predictionData.map(n => n.toFixed(3)));
       }
 
       // Debounce â€” require DEBOUNCE_FRAMES consecutive frames of the same MIDI
@@ -596,7 +595,6 @@ export function usePitchDetection(getAnalyser: () => AnalyserNode | null) {
           }
         }
 
-        console.log('raw model output:', rawProbs.map(v => v.toFixed(4)));
 
         // â”€â”€ Constrain to physically valid strings â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         const masked = rawProbs.map((score, s) => {

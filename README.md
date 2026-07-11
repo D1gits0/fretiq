@@ -1,76 +1,79 @@
-# fretiq
-Real-time guitar string classification and fretboard visualization in the browser.
-Fretiq listens to your guitar through a USB audio interface, identifies which string and fret you're playing using a trained neural network, and lights up a 3D fretboard in real time — no specialized hardware required beyond a modern guitar amplifier with USB output.
+# Fretiq
 
-What it does
+**Browser-native real-time electric guitar string classification via engineered spectral features.**
 
-Captures live guitar audio via Web Audio API from any USB audio interface
-Detects pitch in real time using the YIN/McLeod algorithm (Pitchy)
-Classifies which string is being played using a custom trained neural network (97.1% validation accuracy)
-Combines pitch detection + string classification to pinpoint exact string + fret position
-Renders a reactive 3D fretboard in the browser using React Three Fiber
-Shows confidence heatmap across all possible note positions weighted by model certainty
+## Overview
 
+Fretiq is a real-time electric guitar string classifier that runs entirely in the browser. Given a monophonic audio signal from a guitar, the system detects the pitch using the McLeod Pitch Method and classifies which string produced it using a dense neural network trained on a 26-dimensional feature vector of engineered spectral features. No hexaphonic pickup, fretboard sensor, camera, or multi-microphone setup is required — only a USB-C audio interface and Chrome. The system renders a live 3D fretboard heatmap showing per-string confidence in real time via React Three Fiber.
 
-Tech Stack
+## Results
 
-Next.js 16 — App Router, TypeScript
-React Three Fiber + Drei — 3D fretboard rendering
-Zustand — real-time state management
-TensorFlow.js — in-browser neural network inference
-Pitchy — real-time pitch detection (McLeod algorithm)
-Web Audio API — native browser audio capture
-Python + TensorFlow — model training pipeline
+- **97.1%** shuffled frame-level validation accuracy (322,215 frames, 6 strings, balanced)
+- **87.8%** held-out free-play accuracy (103,000 frames, recorded after training)
+- **2.07 ms** average inference latency (p95: 4.40 ms) on Intel Core Ultra 9 275HX in Chrome
 
+## Paper
 
-How it works
-Guitar → USB Audio Interface → Web Audio API → FFT (1024 bins) →
-26 engineered features (band energies + spectral centroid + MFCCs) →
-Dense neural network → pitch-constrained string prediction →
-3D fretboard visualization
-The model is trained on labeled frequency data recorded string by string using the built-in Data Recorder. Each frame captures 1024 FFT bins which are transformed into 26 features including 8 frequency band energies, 5 spectral features, and 13 MFCCs computed via mel filterbank + DCT. The model never sees raw FFT data — only engineered features that capture the tonal fingerprint of each string.
+Companion arXiv preprint: [link coming soon]
 
-Getting Started
-Prerequisites:
+## Requirements
 
-Node.js 18+
-A guitar amp or audio interface with USB output (tested on Boss Katana Gen 3)
-Chrome browser (Web Audio API most reliable)
+- Boss Katana Gen 3 or any USB-C audio interface providing a clean DI signal
+- Chrome browser (Web Audio API + TensorFlow.js WebGL backend)
+- Node.js 18+
 
-Install and run:
-\`\`\`bash
-git clone https://github.com/yourusername/fretiq
-cd fretiq
+## Getting Started
+
+```bash
 npm install
 npm run dev
-\`\`\`
-Open http://localhost:3000, click Connect, select your audio interface from the browser mic picker, and play.
+```
 
-Training your own model
-The model is trained on YOUR specific guitar and audio interface. General models don't exist for this problem — the tonal fingerprint varies by instrument and signal chain.
-1. Install Python dependencies:
-bashpy -3.11 -m pip install tensorflow-cpu==2.13.0 numpy scikit-learn
-2. Record training data:
-Open the app, go to Data Recorder, toggle each string and play up and down the neck for 3-5 minutes per string. Export the JSON file.
-3. Train:
-bashpy -3.11 train.py --data data/your_session.json --out public/model
-4. Done. The app automatically loads the new model on next page load.
-For best results record multiple sessions across different amp presets and feed them all into train.py together:
-bashpy -3.11 train.py --data data/clean.json data/crunch.json data/lead.json --out public/model
+Navigate to `http://localhost:3000`, connect your audio interface, and click **Connect Katana**.
 
-Project Status
-Currently in active development. Real-world accuracy testing ongoing. Planned additions:
+## Architecture
 
-Technique detection (palm mutes, hammer-ons, slides)
-Temporal modeling for context-aware string inference
-Chord detection
-Multi-preset model support
-Research paper targeting NIME / ISMIR — Fall 2026
+| Layer | Technology |
+|---|---|
+| Framework | Next.js 16 (App Router, TypeScript) |
+| 3D Visualization | React Three Fiber + Drei |
+| ML Inference | TensorFlow.js (weights loaded from `public/model/weights.bin`) |
+| Audio | Web Audio API — `getUserMedia` → `GainNode` → `AnalyserNode` |
+| Pitch Detection | Pitchy (McLeod Pitch Method) |
 
+**Feature vector (26 dimensions):**
+- 8 frequency band energies (sub-bass through air)
+- 5 spectral statistics (centroid, rolloff, flatness, peak index, peak value)
+- 13 MFCCs (40-filter mel filterbank → log compression → orthonormal DCT-II)
 
-Background
-Built by a Physics student at Cal Poly SLO as a self-directed machine learning project. Started April 20, 2026. No prior ML experience at project start.
-The core research problem — identifying which guitar string produced a given pitch from a mono audio signal — is an unsolved problem in music information retrieval. Most existing solutions require hexaphonic pickups or proprietary hardware. Fretiq solves it in software using spectral feature engineering and constrained neural classification.
+**Model architecture:** `Input(26)` → `Dense(128, ReLU)` → `Dropout(0.3)` → `Dense(32, ReLU)` → `Dropout(0.2)` → `Dense(6, softmax)`
 
-License
+Feature extraction is implemented identically in Python (`train.py`) and TypeScript (`hooks/usePitchDetection.ts`) to guarantee training-inference parity.
+
+## Training
+
+The following scripts are included for reproducibility:
+
+| Script | Purpose |
+|---|---|
+| `train.py` | Train the string classifier on recorded session JSON files |
+| `ablation.py` | Run ablation conditions A/B/C with confusion matrix output |
+| `evaluate_heldout.py` | Evaluate the deployed model on a held-out free-play recording |
+
+**Usage:**
+```bash
+py -3.11 train.py --data data/session1.json --out public/model
+py -3.11 ablation.py --clean data/clean.json --comparison data/comp.json
+py -3.11 evaluate_heldout.py --data data/free_playing.json
+```
+
+The `data/` folder is gitignored and not included in this repository. Recording sessions are collected via the in-browser DataRecorder UI.
+
+**Requirements:**
+```bash
+pip install tensorflow-cpu==2.13.0 numpy scikit-learn
+```
+
+## License
+
 MIT
