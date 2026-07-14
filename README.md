@@ -52,6 +52,8 @@ Feature extraction is implemented identically in Python (`train.py`) and TypeScr
 
 ## Training
 
+See [REPRODUCE.md](REPRODUCE.md) for full environment setup, data format documentation, and training instructions. Model weights for inference are included in `/public/model`.
+
 The following scripts are included for reproducibility:
 
 | Script | Purpose |
